@@ -2305,9 +2305,15 @@ local function main()
 			clipboard = newClipboard
 		end})
         
-		context:Register("COPY_GS_CODE",{Name = "Copy", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", Shortcut = "Ctrl+Shift+C", OnClick = function()
+		context:Register("COPY_GS_CODE",{Name = "Copy GS Code", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", Shortcut = "Ctrl+Shift+C", OnClick = function()
 			local sList,newClipboard = selection.List,{}
-			env.setclipboard(GetGSID(sList))
+			local targets = {}
+			for i,v in ipairs() do
+				targets[#targets+1] = v.Obj
+			end
+			task.spawn(function()
+				env.setclipboard(GetGSID(targets))
+			end)
 		end})
 
 		context:Register("PASTE",{Name = "Paste Into", IconMap = Explorer.MiscIcons, Icon = "Paste", DisabledIcon = "Paste_Disabled", Shortcut = "Ctrl+Shift+V", OnClick = function()
