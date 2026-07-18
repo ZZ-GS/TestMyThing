@@ -78,457 +78,6 @@ local function initAfterMain()
 	Notebook = Apps.Notebook
 end
 
-function GetGSFunction()
-    --!optimize 2
-	--!native
-
-	local EncodingService = cloneref(game:GetService("EncodingService"))
-	local RS = cloneref(game:GetService("ReflectionService"))
-	local ACP = cloneref(game:GetService("AnimationClipProvider"))
-
-	local Services = { 
-		AdService = true, AnalyticsService = true, AnimationClipProvider = true, AppStorageService = true, AssetService = true, 
-		AvatarEditorService = true, BadgeService = true, BrowserService = true, CSGDictionaryService = true, ChangeHistoryService = true, 
-		Chat = true, CloudLocalizationTable = true, CollectionService = true, ContentProvider = true, ContextActionService = true, 
-		ControllerService = true, CookiesService = true, CoreGui = true, CorePackages = true, Debris = true, EventIngestService = true, 
-		ExperienceAuthService = true, FaceAnimatorService = true, FacialAnimationStreamingServiceV2 = true, FriendService = true, 
-		GamePassService = true, GamepadService = true, Geometry = true, GroupService = true, GuiService = true, GuidRegistryService = true, 
-		HSRDataContentProvider = true, HapticService = true, HttpRbxApiService = true, HttpService = true, IXPService = true, 
-		InsertService = true, JointsService = true, KeyboardService = true, KeyframeSequenceProvider = true, Lighting = true, 
-		LocalizationService = true, LodDataService = true, LogService = true, MarketplaceService = true, MaterialService = true, 
-		MemStorageService = true, MeshContentProvider = true, MessageBusService = true, MouseService = true, NetworkClient = true, 
-		NonReplicatedCSGDictionaryService = true, NotificationService = true, PathfindingService = true, PermissionsService = true, 
-		PhysicsService = true, PlayerEmulatorService = true, Players = true, PluginGuiService = true, PointsService = true, 
-		PolicyService = true, ProximityPromptService = true, RbxAnalyticsService = true, ReplicatedFirst = true, ReplicatedStorage = true, 
-		RobloxReplicatedStorage = true, RtMessagingService = true, RunService = true, RuntimeScriptService = true, SafetyService = true, 
-		ScriptContext = true, ScriptRegistrationService = true, ScriptService = true, Selection = true, ServerScriptService = true, 
-		ServerStorage = true, SessionService = true, SharedTableRegistry = true, SocialService = true, SolidModelContentProvider = true, 
-		SoundService = true, StarterGui = true, StarterPack = true, StarterPlayer = true, Stats = true, StudioData = true, Teams = true, 
-		TeleportService = true, TestService = true, TextBoxService = true, TextChatService = true, TextService = true, TimerService = true, 
-		TouchInputService = true, TweenService = true, UserInputService = true, VRService = true, VideoCaptureService = true, Visit = true, 
-		VoiceChatService = true, Workspace = false 
-	}
-
-
-
-	local Templates = {}
-	local currentCapacity = 4 * 1024 * 1024
-	local mainBuffer = buffer.create(currentCapacity)
-	local cursor = 0
-
-	local stringPool = {}
-	local stringPoolCount = 0
-	local pathCache = {}
-
-	local function EnsureCapacity(needed: number)
-		if cursor + needed > currentCapacity then
-			while cursor + needed > currentCapacity do
-				currentCapacity *= 2
-			end
-			local newBuffer = buffer.create(currentCapacity)
-			buffer.copy(newBuffer, 0, mainBuffer, 0, cursor)
-			mainBuffer = newBuffer
-		end
-	end
-
-	local function getStringId(str: string): number
-		local id = stringPool[str]
-		if id then return id end
-		stringPoolCount += 1
-		id = stringPoolCount
-		stringPool[str] = id
-
-		local len = #str
-		EnsureCapacity(1 + 2 + 2 + len)
-
-		buffer.writeu8(mainBuffer, cursor, 1)
-		cursor += 1
-		buffer.writeu16(mainBuffer, cursor, id)
-		cursor += 2
-		buffer.writeu16(mainBuffer, cursor, len)
-		cursor += 2
-		buffer.writestring(mainBuffer, cursor, str)
-		cursor += len
-
-		return id
-	end
-
-	local function FixErrorCharacters(String: string)
-		if string.find(String, "[\"\\]") then
-			return string.gsub(String, "[\"\\]", function(char)
-				return char == "\"" and "\\34" or "\\92"
-			end)
-		end
-		return String
-	end
-
-	local function FindPath(Object : Instance)
-		if pathCache[Object] then return pathCache[Object] end
-		local LoopObject = Object
-		local parts = {}
-		local count = 0
-		repeat
-			if LoopObject == nil then break end
-			if LoopObject:IsA("DataModel") then
-				count += 1 parts[count] = "game"
-				break
-			elseif Services[LoopObject.ClassName] then
-				count += 1 parts[count] = ':GetService("' .. LoopObject.ClassName .. '")'
-				break
-			elseif LoopObject:IsA("Workspace") then
-				count += 1 parts[count] = "workspace"
-				break
-			else
-				count += 1 parts[count] = "." .. FixErrorCharacters(LoopObject.Name)
-			end
-			LoopObject = LoopObject.Parent
-		until LoopObject == nil
-
-		for i = 1, math.floor(count / 2) do
-			local j = count - i + 1
-			parts[i], parts[j] = parts[j], parts[i]
-		end
-
-		local result = table.concat(parts)
-		pathCache[Object] = result
-		return result
-	end
-	
-	local function isReadOnly(instance,property)
-		return not (pcall(function()
-			instance[property] = instance[property]
-		end))
-	end
-
-	local function tableMainValuesV2(obj : Instance)
-		local objType = obj.ClassName
-		if Templates[objType] then return Templates[objType] end
-		
-		local blacklist = {["DataCost"] = true, ["SourceAssetId"] = true,["WorldRotation"] = true,["WorldPosition"] = true,["WorldOrientation"] = true,["WorldCFrame"] = true,["WorldAxis"] = true,["WorldSecondaryAxis"] = true,["NumberEmotesLoaded"] = true,["InternalDisplayName"] = true,["PlayerToHideFrom"] = true, ["Source"] = true, ["EvaluationThrottled"] = true, ["Parent"] = true, ["Capabilities"] = true}
-		if obj:IsA("GuiObject") then blacklist["Transparency"] = true end
-
-		local AssemblyVelocities = {["AssemblyAngularVelocity"] = true, ["AssemblyLinearVelocity"] = true}
-		local reflectedProperties = RS:GetPropertiesOfClass(objType)
-		local addForLast = {}
-		local addForLastPreParent = {}
-		local res = {}
-
-		for i = 1, #reflectedProperties do
-			local v = reflectedProperties[i]
-			if (v.Permits.Write or not isReadOnly(obj, v.Name)) and v.Permits.Read and not v.Display.DeprecationMessage and not blacklist[v.Name] then
-				if AssemblyVelocities[v.Name] then
-					res[#res+1] = v.Name
-					continue
-				elseif v.Type.ScriptType == "Color3" then
-					addForLastPreParent[#addForLastPreParent+1] = v.Name
-					continue
-				end
-				res[#res+1] = v.Name
-			end
-		end
-
-		for i = 1, #addForLastPreParent do res[#res+1] = addForLastPreParent[i] end
-		res[#res+1] = "Parent"
-		for i = 1, #addForLast do res[#res+1] = addForLast[i] end
-
-		Templates[objType] = res
-		return res
-	end
-
-	local Reterning = {}
-	local reterningCount = 0
-
-	local function main(object, property, instanceId: number)
-		if object:IsPropertyModified(property) then
-			local val = object[property]
-			local t = typeof(val)
-
-			if t == "Instance" then
-				reterningCount += 3
-				Reterning[reterningCount - 2] = property
-				Reterning[reterningCount - 1] = val
-				Reterning[reterningCount] = instanceId
-				return
-			end
-
-			local propId = getStringId(property)
-
-			if t == "boolean" then
-				EnsureCapacity(9)
-				buffer.writeu8(mainBuffer, cursor, 3) 
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 1) 
-				buffer.writeu8(mainBuffer, cursor + 8, val and 1 or 0)
-				cursor += 9
-			elseif t == "number" then
-				EnsureCapacity(16)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 2) 
-				buffer.writef64(mainBuffer, cursor + 8, val)
-				cursor += 16
-			elseif t == "Vector3" then
-				EnsureCapacity(20)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 3) 
-				buffer.writef32(mainBuffer, cursor + 8, val.X)
-				buffer.writef32(mainBuffer, cursor + 12, val.Y)
-				buffer.writef32(mainBuffer, cursor + 16, val.Z)
-				cursor += 20
-			elseif t == "CFrame" then
-				EnsureCapacity(56)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 4) 
-				local c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = val:GetComponents()
-				buffer.writef32(mainBuffer, cursor + 8, c1)
-				buffer.writef32(mainBuffer, cursor + 12, c2)
-				buffer.writef32(mainBuffer, cursor + 16, c3)
-				buffer.writef32(mainBuffer, cursor + 20, c4)
-				buffer.writef32(mainBuffer, cursor + 24, c5)
-				buffer.writef32(mainBuffer, cursor + 28, c6)
-				buffer.writef32(mainBuffer, cursor + 32, c7)
-				buffer.writef32(mainBuffer, cursor + 36, c8)
-				buffer.writef32(mainBuffer, cursor + 40, c9)
-				buffer.writef32(mainBuffer, cursor + 44, c10)
-				buffer.writef32(mainBuffer, cursor + 48, c11)
-				buffer.writef32(mainBuffer, cursor + 52, c12)
-				cursor += 56
-			elseif t == "Color3" then
-				EnsureCapacity(20)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 5) 
-				buffer.writef32(mainBuffer, cursor + 8, val.R)
-				buffer.writef32(mainBuffer, cursor + 12, val.G)
-				buffer.writef32(mainBuffer, cursor + 16, val.B)
-				cursor += 20
-			elseif t == "Vector2" then
-				EnsureCapacity(16)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 6) 
-				buffer.writef32(mainBuffer, cursor + 8, val.X)
-				buffer.writef32(mainBuffer, cursor + 12, val.Y)
-				cursor += 16
-			elseif t == "UDim" then
-				EnsureCapacity(16)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 7) 
-				buffer.writef32(mainBuffer, cursor + 8, val.Scale)
-				buffer.writei32(mainBuffer, cursor + 12, val.Offset)
-				cursor += 16
-			elseif t == "UDim2" then
-				EnsureCapacity(24)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 8) 
-				local x, y = val.X, val.Y
-				buffer.writef32(mainBuffer, cursor + 8, x.Scale)
-				buffer.writei32(mainBuffer, cursor + 12, x.Offset)
-				buffer.writef32(mainBuffer, cursor + 16, y.Scale)
-				buffer.writei32(mainBuffer, cursor + 20, y.Offset)
-				cursor += 24
-			elseif t == "string" then
-				local len = #val
-				EnsureCapacity(12 + len)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 9) 
-				buffer.writeu32(mainBuffer, cursor + 8, len)
-				buffer.writestring(mainBuffer, cursor + 12, val)
-				cursor += 12 + len
-			elseif t == "EnumItem" then
-				EnsureCapacity(12)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 10) 
-				buffer.writei32(mainBuffer, cursor + 8, val.Value)
-				cursor += 12
-			elseif t == "Content" then
-				if val.SourceType == Enum.ContentSourceType.Uri then
-					local uriStr = val.Uri
-					local len = #uriStr
-					EnsureCapacity(13 + len)
-					buffer.writeu8(mainBuffer, cursor, 3)                -- Type 3: Property Record
-					buffer.writeu32(mainBuffer, cursor + 1, instanceId)   -- معرف الكائن
-					buffer.writeu16(mainBuffer, cursor + 5, propId)       -- معرف الخاصية
-					buffer.writeu8(mainBuffer, cursor + 7, 12)            -- نوع البيانات (12 = Content)
-					buffer.writeu8(mainBuffer, cursor + 8, 1)             -- نوع فرعي (1 = Uri)
-					buffer.writeu32(mainBuffer, cursor + 9, len)          -- طول النص
-					buffer.writestring(mainBuffer, cursor + 13, uriStr)   -- الرابط المباشر
-					cursor += 13 + len
-
-				elseif val.SourceType == Enum.ContentSourceType.Object then
-					local image = val.Object
-					if image and image:IsA("EditableImage") then
-						local pixelBuf = image:ReadPixelsBuffer(Vector2.new(0, 0), image.Size)
-						local bufLen = buffer.len(pixelBuf)
-
-						EnsureCapacity(21 + bufLen)
-
-						buffer.writeu8(mainBuffer, cursor, 3)                -- Type 3: Property Record
-						buffer.writeu32(mainBuffer, cursor + 1, instanceId)   -- معرف الكائن
-						buffer.writeu16(mainBuffer, cursor + 5, propId)       -- معرف الخاصية
-						buffer.writeu8(mainBuffer, cursor + 7, 12)            -- نوع البيانات (12 = Content)
-						buffer.writeu8(mainBuffer, cursor + 8, 2)             -- نوع فرعي (2 = Object/EditableImage)
-						buffer.writeu32(mainBuffer, cursor + 9, image.Size.X)  -- العرض
-						buffer.writeu32(mainBuffer, cursor + 13, image.Size.Y) -- الارتفاع
-						buffer.writeu32(mainBuffer, cursor + 17, bufLen)       -- حجم بافر البكسلات
-						buffer.copy(mainBuffer, cursor + 21, pixelBuf, 0, bufLen)
-						
-						cursor += 21 + bufLen
-					end
-				end
-			else
-				local strVal = tostring(val)
-				local len = #strVal
-				EnsureCapacity(12 + len)
-				buffer.writeu8(mainBuffer, cursor, 3)
-				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu8(mainBuffer, cursor + 7, 11) 
-				buffer.writeu32(mainBuffer, cursor + 8, len)
-				buffer.writestring(mainBuffer, cursor + 12, strVal)
-				cursor += 12 + len
-			end
-		end
-	end
-
-	local function GetObjectsProperties(Target)
-		cursor = 0
-		stringPool = {}
-		stringPoolCount = 0
-		reterningCount = 0
-		pathCache = {}
-
-		local first_time = os.clock()
-		local classBlackList = {["TouchTransmitter"] = true, ["Status"] = true}
-		local obj = {}
-		local objCount = 0
-		local instanceToId = {}
-		local unique = {}
-		local instanceIdCounter = 1
-
-		for i = 1, #Target do
-			local root = Target[i]
-			if not unique[root] then
-				if not classBlackList[root.ClassName] then
-					unique[root] = true
-					objCount += 1
-					obj[objCount] = root
-					instanceToId[root] = instanceIdCounter
-					instanceIdCounter += 1
-				end
-
-				local descendants = root:GetDescendants()
-				for j = 1, #descendants do
-					local desc = descendants[j]
-					if not unique[desc] and not classBlackList[desc.ClassName] then
-						unique[desc] = true
-						objCount += 1
-						obj[objCount] = desc
-						instanceToId[desc] = instanceIdCounter
-						instanceIdCounter += 1
-					end
-				end
-			end
-		end
-
-		local n = 0
-		for i = 1, objCount do
-			n += 1 if n == 2500 then n = 0 task.wait() end 
-			
-			local vu = obj[i]
-			local currentId = instanceToId[vu]
-
-			local classStrId = getStringId(vu.ClassName)
-			local typeMode = 3
-			local extraStrId = 0
-
-			if Services[vu.ClassName] or vu.ClassName == "Terrain" then
-				typeMode = 1
-				extraStrId = getStringId(FindPath(vu))
-			elseif vu.ClassName == "MeshPart" then
-				typeMode = 2
-				extraStrId = getStringId(vu.MeshId)
-			end
-
-			EnsureCapacity(10)
-			buffer.writeu8(mainBuffer, cursor, 2)
-			buffer.writeu32(mainBuffer, cursor + 1, currentId)
-			buffer.writeu16(mainBuffer, cursor + 5, classStrId)
-			buffer.writeu8(mainBuffer, cursor + 7, typeMode)
-			buffer.writeu16(mainBuffer, cursor + 8, extraStrId)
-			cursor += 10
-			
-			local MainValues = tableMainValuesV2(vu)
-			for j = 1, #MainValues do
-				main(vu, MainValues[j], currentId)
-			end
-		end
-
-		for i = 1, reterningCount / 3 do
-			local i2 = i * 3
-			local prop = Reterning[i2-2]
-			local refObj = Reterning[i2-1]
-			local srcId = Reterning[i2]
-
-			local propId = getStringId(prop)
-			local targetId = instanceToId[refObj]
-
-			if targetId then
-				EnsureCapacity(11)
-				buffer.writeu8(mainBuffer, cursor, 4) -- Type 4: Internal Object Reference
-				buffer.writeu32(mainBuffer, cursor + 1, srcId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu32(mainBuffer, cursor + 7, targetId)
-				cursor += 11
-			else
-				local path = FindPath(refObj)
-				local pathStrId = getStringId(path)
-				EnsureCapacity(9)
-				buffer.writeu8(mainBuffer, cursor, 5) -- Type 5: External Object Reference
-				buffer.writeu32(mainBuffer, cursor + 1, srcId)
-				buffer.writeu16(mainBuffer, cursor + 5, propId)
-				buffer.writeu16(mainBuffer, cursor + 7, pathStrId)
-				cursor += 9
-			end
-		end
-		
-		warn("Time :", os.clock() - first_time, "s")
-
-		local finalBuffer = buffer.create(cursor)
-		buffer.copy(finalBuffer, 0, mainBuffer, 0, cursor)
-		return finalBuffer
-	end
-	local GS_FUNCTIONS = {}
-	GS_FUNCTIONS.InsertFormat = `game:GetService("ConfigService")["Import_instance.gs"]:SetAttribute("Input","%s")`
-
-	function GS_FUNCTIONS.GetGSID(Targets : {Instance})
-		local b = GetObjectsProperties(Targets)
-
-		b = EncodingService:CompressBuffer(b, Enum.CompressionAlgorithm.Zstd)
-		b = EncodingService:Base64Encode(b) 
-		
-		return (string.format(GS_FUNCTIONS.InsertFormat, buffer.tostring(b)) )
-	end
-
-    return GS_FUNCTIONS.GetGSID
-end
-local GetGSID = GetGSFunction()
 
 local function main()
 	local Console = {}
@@ -2312,6 +1861,7 @@ local function main()
 				targets[#targets+1] = v.Obj
 			end
 			task.spawn(function()
+                print(GetGSID(targets))
 				env.setclipboard(GetGSID(targets))
 			end)
 		end})
@@ -14125,6 +13675,457 @@ end
 end,
 }
 local oldgame = oldgame or game
+function GetGSFunction()
+    --!optimize 2
+	--!native
+
+	local EncodingService = cloneref(game:GetService("EncodingService"))
+	local RS = cloneref(game:GetService("ReflectionService"))
+	local ACP = cloneref(game:GetService("AnimationClipProvider"))
+
+	local Services = { 
+		AdService = true, AnalyticsService = true, AnimationClipProvider = true, AppStorageService = true, AssetService = true, 
+		AvatarEditorService = true, BadgeService = true, BrowserService = true, CSGDictionaryService = true, ChangeHistoryService = true, 
+		Chat = true, CloudLocalizationTable = true, CollectionService = true, ContentProvider = true, ContextActionService = true, 
+		ControllerService = true, CookiesService = true, CoreGui = true, CorePackages = true, Debris = true, EventIngestService = true, 
+		ExperienceAuthService = true, FaceAnimatorService = true, FacialAnimationStreamingServiceV2 = true, FriendService = true, 
+		GamePassService = true, GamepadService = true, Geometry = true, GroupService = true, GuiService = true, GuidRegistryService = true, 
+		HSRDataContentProvider = true, HapticService = true, HttpRbxApiService = true, HttpService = true, IXPService = true, 
+		InsertService = true, JointsService = true, KeyboardService = true, KeyframeSequenceProvider = true, Lighting = true, 
+		LocalizationService = true, LodDataService = true, LogService = true, MarketplaceService = true, MaterialService = true, 
+		MemStorageService = true, MeshContentProvider = true, MessageBusService = true, MouseService = true, NetworkClient = true, 
+		NonReplicatedCSGDictionaryService = true, NotificationService = true, PathfindingService = true, PermissionsService = true, 
+		PhysicsService = true, PlayerEmulatorService = true, Players = true, PluginGuiService = true, PointsService = true, 
+		PolicyService = true, ProximityPromptService = true, RbxAnalyticsService = true, ReplicatedFirst = true, ReplicatedStorage = true, 
+		RobloxReplicatedStorage = true, RtMessagingService = true, RunService = true, RuntimeScriptService = true, SafetyService = true, 
+		ScriptContext = true, ScriptRegistrationService = true, ScriptService = true, Selection = true, ServerScriptService = true, 
+		ServerStorage = true, SessionService = true, SharedTableRegistry = true, SocialService = true, SolidModelContentProvider = true, 
+		SoundService = true, StarterGui = true, StarterPack = true, StarterPlayer = true, Stats = true, StudioData = true, Teams = true, 
+		TeleportService = true, TestService = true, TextBoxService = true, TextChatService = true, TextService = true, TimerService = true, 
+		TouchInputService = true, TweenService = true, UserInputService = true, VRService = true, VideoCaptureService = true, Visit = true, 
+		VoiceChatService = true, Workspace = false 
+	}
+
+
+
+	local Templates = {}
+	local currentCapacity = 4 * 1024 * 1024
+	local mainBuffer = buffer.create(currentCapacity)
+	local cursor = 0
+
+	local stringPool = {}
+	local stringPoolCount = 0
+	local pathCache = {}
+
+	local function EnsureCapacity(needed: number)
+		if cursor + needed > currentCapacity then
+			while cursor + needed > currentCapacity do
+				currentCapacity *= 2
+			end
+			local newBuffer = buffer.create(currentCapacity)
+			buffer.copy(newBuffer, 0, mainBuffer, 0, cursor)
+			mainBuffer = newBuffer
+		end
+	end
+
+	local function getStringId(str: string): number
+		local id = stringPool[str]
+		if id then return id end
+		stringPoolCount += 1
+		id = stringPoolCount
+		stringPool[str] = id
+
+		local len = #str
+		EnsureCapacity(1 + 2 + 2 + len)
+
+		buffer.writeu8(mainBuffer, cursor, 1)
+		cursor += 1
+		buffer.writeu16(mainBuffer, cursor, id)
+		cursor += 2
+		buffer.writeu16(mainBuffer, cursor, len)
+		cursor += 2
+		buffer.writestring(mainBuffer, cursor, str)
+		cursor += len
+
+		return id
+	end
+
+	local function FixErrorCharacters(String: string)
+		if string.find(String, "[\"\\]") then
+			return string.gsub(String, "[\"\\]", function(char)
+				return char == "\"" and "\\34" or "\\92"
+			end)
+		end
+		return String
+	end
+
+	local function FindPath(Object : Instance)
+		if pathCache[Object] then return pathCache[Object] end
+		local LoopObject = Object
+		local parts = {}
+		local count = 0
+		repeat
+			if LoopObject == nil then break end
+			if LoopObject:IsA("DataModel") then
+				count += 1 parts[count] = "game"
+				break
+			elseif Services[LoopObject.ClassName] then
+				count += 1 parts[count] = ':GetService("' .. LoopObject.ClassName .. '")'
+				break
+			elseif LoopObject:IsA("Workspace") then
+				count += 1 parts[count] = "workspace"
+				break
+			else
+				count += 1 parts[count] = "." .. FixErrorCharacters(LoopObject.Name)
+			end
+			LoopObject = LoopObject.Parent
+		until LoopObject == nil
+
+		for i = 1, math.floor(count / 2) do
+			local j = count - i + 1
+			parts[i], parts[j] = parts[j], parts[i]
+		end
+
+		local result = table.concat(parts)
+		pathCache[Object] = result
+		return result
+	end
+	
+	local function isReadOnly(instance,property)
+		return not (pcall(function()
+			instance[property] = instance[property]
+		end))
+	end
+
+	local function tableMainValuesV2(obj : Instance)
+		local objType = obj.ClassName
+		if Templates[objType] then return Templates[objType] end
+		
+		local blacklist = {["DataCost"] = true, ["SourceAssetId"] = true,["WorldRotation"] = true,["WorldPosition"] = true,["WorldOrientation"] = true,["WorldCFrame"] = true,["WorldAxis"] = true,["WorldSecondaryAxis"] = true,["NumberEmotesLoaded"] = true,["InternalDisplayName"] = true,["PlayerToHideFrom"] = true, ["Source"] = true, ["EvaluationThrottled"] = true, ["Parent"] = true, ["Capabilities"] = true}
+		if obj:IsA("GuiObject") then blacklist["Transparency"] = true end
+
+		local AssemblyVelocities = {["AssemblyAngularVelocity"] = true, ["AssemblyLinearVelocity"] = true}
+		local reflectedProperties = RS:GetPropertiesOfClass(objType)
+		local addForLast = {}
+		local addForLastPreParent = {}
+		local res = {}
+
+		for i = 1, #reflectedProperties do
+			local v = reflectedProperties[i]
+			if (v.Permits.Write or not isReadOnly(obj, v.Name)) and v.Permits.Read and not v.Display.DeprecationMessage and not blacklist[v.Name] then
+				if AssemblyVelocities[v.Name] then
+					res[#res+1] = v.Name
+					continue
+				elseif v.Type.ScriptType == "Color3" then
+					addForLastPreParent[#addForLastPreParent+1] = v.Name
+					continue
+				end
+				res[#res+1] = v.Name
+			end
+		end
+
+		for i = 1, #addForLastPreParent do res[#res+1] = addForLastPreParent[i] end
+		res[#res+1] = "Parent"
+		for i = 1, #addForLast do res[#res+1] = addForLast[i] end
+
+		Templates[objType] = res
+		return res
+	end
+
+	local Reterning = {}
+	local reterningCount = 0
+
+	local function main(object, property, instanceId: number)
+		if object:IsPropertyModified(property) then
+			local val = object[property]
+			local t = typeof(val)
+
+			if t == "Instance" then
+				reterningCount += 3
+				Reterning[reterningCount - 2] = property
+				Reterning[reterningCount - 1] = val
+				Reterning[reterningCount] = instanceId
+				return
+			end
+
+			local propId = getStringId(property)
+
+			if t == "boolean" then
+				EnsureCapacity(9)
+				buffer.writeu8(mainBuffer, cursor, 3) 
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 1) 
+				buffer.writeu8(mainBuffer, cursor + 8, val and 1 or 0)
+				cursor += 9
+			elseif t == "number" then
+				EnsureCapacity(16)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 2) 
+				buffer.writef64(mainBuffer, cursor + 8, val)
+				cursor += 16
+			elseif t == "Vector3" then
+				EnsureCapacity(20)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 3) 
+				buffer.writef32(mainBuffer, cursor + 8, val.X)
+				buffer.writef32(mainBuffer, cursor + 12, val.Y)
+				buffer.writef32(mainBuffer, cursor + 16, val.Z)
+				cursor += 20
+			elseif t == "CFrame" then
+				EnsureCapacity(56)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 4) 
+				local c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = val:GetComponents()
+				buffer.writef32(mainBuffer, cursor + 8, c1)
+				buffer.writef32(mainBuffer, cursor + 12, c2)
+				buffer.writef32(mainBuffer, cursor + 16, c3)
+				buffer.writef32(mainBuffer, cursor + 20, c4)
+				buffer.writef32(mainBuffer, cursor + 24, c5)
+				buffer.writef32(mainBuffer, cursor + 28, c6)
+				buffer.writef32(mainBuffer, cursor + 32, c7)
+				buffer.writef32(mainBuffer, cursor + 36, c8)
+				buffer.writef32(mainBuffer, cursor + 40, c9)
+				buffer.writef32(mainBuffer, cursor + 44, c10)
+				buffer.writef32(mainBuffer, cursor + 48, c11)
+				buffer.writef32(mainBuffer, cursor + 52, c12)
+				cursor += 56
+			elseif t == "Color3" then
+				EnsureCapacity(20)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 5) 
+				buffer.writef32(mainBuffer, cursor + 8, val.R)
+				buffer.writef32(mainBuffer, cursor + 12, val.G)
+				buffer.writef32(mainBuffer, cursor + 16, val.B)
+				cursor += 20
+			elseif t == "Vector2" then
+				EnsureCapacity(16)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 6) 
+				buffer.writef32(mainBuffer, cursor + 8, val.X)
+				buffer.writef32(mainBuffer, cursor + 12, val.Y)
+				cursor += 16
+			elseif t == "UDim" then
+				EnsureCapacity(16)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 7) 
+				buffer.writef32(mainBuffer, cursor + 8, val.Scale)
+				buffer.writei32(mainBuffer, cursor + 12, val.Offset)
+				cursor += 16
+			elseif t == "UDim2" then
+				EnsureCapacity(24)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 8) 
+				local x, y = val.X, val.Y
+				buffer.writef32(mainBuffer, cursor + 8, x.Scale)
+				buffer.writei32(mainBuffer, cursor + 12, x.Offset)
+				buffer.writef32(mainBuffer, cursor + 16, y.Scale)
+				buffer.writei32(mainBuffer, cursor + 20, y.Offset)
+				cursor += 24
+			elseif t == "string" then
+				local len = #val
+				EnsureCapacity(12 + len)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 9) 
+				buffer.writeu32(mainBuffer, cursor + 8, len)
+				buffer.writestring(mainBuffer, cursor + 12, val)
+				cursor += 12 + len
+			elseif t == "EnumItem" then
+				EnsureCapacity(12)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 10) 
+				buffer.writei32(mainBuffer, cursor + 8, val.Value)
+				cursor += 12
+			elseif t == "Content" then
+				if val.SourceType == Enum.ContentSourceType.Uri then
+					local uriStr = val.Uri
+					local len = #uriStr
+					EnsureCapacity(13 + len)
+					buffer.writeu8(mainBuffer, cursor, 3)                -- Type 3: Property Record
+					buffer.writeu32(mainBuffer, cursor + 1, instanceId)   -- معرف الكائن
+					buffer.writeu16(mainBuffer, cursor + 5, propId)       -- معرف الخاصية
+					buffer.writeu8(mainBuffer, cursor + 7, 12)            -- نوع البيانات (12 = Content)
+					buffer.writeu8(mainBuffer, cursor + 8, 1)             -- نوع فرعي (1 = Uri)
+					buffer.writeu32(mainBuffer, cursor + 9, len)          -- طول النص
+					buffer.writestring(mainBuffer, cursor + 13, uriStr)   -- الرابط المباشر
+					cursor += 13 + len
+
+				elseif val.SourceType == Enum.ContentSourceType.Object then
+					local image = val.Object
+					if image and image:IsA("EditableImage") then
+						local pixelBuf = image:ReadPixelsBuffer(Vector2.new(0, 0), image.Size)
+						local bufLen = buffer.len(pixelBuf)
+
+						EnsureCapacity(21 + bufLen)
+
+						buffer.writeu8(mainBuffer, cursor, 3)                -- Type 3: Property Record
+						buffer.writeu32(mainBuffer, cursor + 1, instanceId)   -- معرف الكائن
+						buffer.writeu16(mainBuffer, cursor + 5, propId)       -- معرف الخاصية
+						buffer.writeu8(mainBuffer, cursor + 7, 12)            -- نوع البيانات (12 = Content)
+						buffer.writeu8(mainBuffer, cursor + 8, 2)             -- نوع فرعي (2 = Object/EditableImage)
+						buffer.writeu32(mainBuffer, cursor + 9, image.Size.X)  -- العرض
+						buffer.writeu32(mainBuffer, cursor + 13, image.Size.Y) -- الارتفاع
+						buffer.writeu32(mainBuffer, cursor + 17, bufLen)       -- حجم بافر البكسلات
+						buffer.copy(mainBuffer, cursor + 21, pixelBuf, 0, bufLen)
+						
+						cursor += 21 + bufLen
+					end
+				end
+			else
+				local strVal = tostring(val)
+				local len = #strVal
+				EnsureCapacity(12 + len)
+				buffer.writeu8(mainBuffer, cursor, 3)
+				buffer.writeu32(mainBuffer, cursor + 1, instanceId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu8(mainBuffer, cursor + 7, 11) 
+				buffer.writeu32(mainBuffer, cursor + 8, len)
+				buffer.writestring(mainBuffer, cursor + 12, strVal)
+				cursor += 12 + len
+			end
+		end
+	end
+
+	local function GetObjectsProperties(Target)
+		cursor = 0
+		stringPool = {}
+		stringPoolCount = 0
+		reterningCount = 0
+		pathCache = {}
+
+		local first_time = os.clock()
+		local classBlackList = {["TouchTransmitter"] = true, ["Status"] = true}
+		local obj = {}
+		local objCount = 0
+		local instanceToId = {}
+		local unique = {}
+		local instanceIdCounter = 1
+
+		for i = 1, #Target do
+			local root = Target[i]
+			if not unique[root] then
+				if not classBlackList[root.ClassName] then
+					unique[root] = true
+					objCount += 1
+					obj[objCount] = root
+					instanceToId[root] = instanceIdCounter
+					instanceIdCounter += 1
+				end
+
+				local descendants = root:GetDescendants()
+				for j = 1, #descendants do
+					local desc = descendants[j]
+					if not unique[desc] and not classBlackList[desc.ClassName] then
+						unique[desc] = true
+						objCount += 1
+						obj[objCount] = desc
+						instanceToId[desc] = instanceIdCounter
+						instanceIdCounter += 1
+					end
+				end
+			end
+		end
+
+		local n = 0
+		for i = 1, objCount do
+			n += 1 if n == 2500 then n = 0 task.wait() end 
+			
+			local vu = obj[i]
+			local currentId = instanceToId[vu]
+
+			local classStrId = getStringId(vu.ClassName)
+			local typeMode = 3
+			local extraStrId = 0
+
+			if Services[vu.ClassName] or vu.ClassName == "Terrain" then
+				typeMode = 1
+				extraStrId = getStringId(FindPath(vu))
+			elseif vu.ClassName == "MeshPart" then
+				typeMode = 2
+				extraStrId = getStringId(vu.MeshId)
+			end
+
+			EnsureCapacity(10)
+			buffer.writeu8(mainBuffer, cursor, 2)
+			buffer.writeu32(mainBuffer, cursor + 1, currentId)
+			buffer.writeu16(mainBuffer, cursor + 5, classStrId)
+			buffer.writeu8(mainBuffer, cursor + 7, typeMode)
+			buffer.writeu16(mainBuffer, cursor + 8, extraStrId)
+			cursor += 10
+			
+			local MainValues = tableMainValuesV2(vu)
+			for j = 1, #MainValues do
+				main(vu, MainValues[j], currentId)
+			end
+		end
+
+		for i = 1, reterningCount / 3 do
+			local i2 = i * 3
+			local prop = Reterning[i2-2]
+			local refObj = Reterning[i2-1]
+			local srcId = Reterning[i2]
+
+			local propId = getStringId(prop)
+			local targetId = instanceToId[refObj]
+
+			if targetId then
+				EnsureCapacity(11)
+				buffer.writeu8(mainBuffer, cursor, 4) -- Type 4: Internal Object Reference
+				buffer.writeu32(mainBuffer, cursor + 1, srcId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu32(mainBuffer, cursor + 7, targetId)
+				cursor += 11
+			else
+				local path = FindPath(refObj)
+				local pathStrId = getStringId(path)
+				EnsureCapacity(9)
+				buffer.writeu8(mainBuffer, cursor, 5) -- Type 5: External Object Reference
+				buffer.writeu32(mainBuffer, cursor + 1, srcId)
+				buffer.writeu16(mainBuffer, cursor + 5, propId)
+				buffer.writeu16(mainBuffer, cursor + 7, pathStrId)
+				cursor += 9
+			end
+		end
+		
+		warn("Time :", os.clock() - first_time, "s")
+
+		local finalBuffer = buffer.create(cursor)
+		buffer.copy(finalBuffer, 0, mainBuffer, 0, cursor)
+		return finalBuffer
+	end
+	local GS_FUNCTIONS = {}
+	GS_FUNCTIONS.InsertFormat = `game:GetService("ConfigService")["Import_instance.gs"]:SetAttribute("Input","%s")`
+
+	function GS_FUNCTIONS.GetGSID(Targets : {Instance})
+		local b = GetObjectsProperties(Targets)
+
+		b = EncodingService:CompressBuffer(b, Enum.CompressionAlgorithm.Zstd)
+		b = EncodingService:Base64Encode(b) 
+		
+		return (string.format(GS_FUNCTIONS.InsertFormat, buffer.tostring(b)) )
+	end
+
+    return GS_FUNCTIONS.GetGSID
+end
+local GetGSID = GetGSFunction()
 
 cloneref = cloneref or function(ref)
 	if not getreg then return ref end
