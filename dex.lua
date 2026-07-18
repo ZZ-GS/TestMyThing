@@ -2312,7 +2312,6 @@ local function main()
 				targets[#targets+1] = v.Obj
 			end
 			task.spawn(function()
-                print(GetGSID(targets))
 				env.setclipboard(GetGSID(targets))
 			end)
 		end})
