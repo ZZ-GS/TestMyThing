@@ -11544,7 +11544,6 @@ local function main()
 			context:AddRegistered("STOP", not ModelViewer.IsViewing)	
 			context:AddRegistered("REFRESH", not ModelViewer.IsViewing)
 			context:AddRegistered("COPY_PATH", not ModelViewer.IsViewing)
-            context:AddRegistered("COPY_GS_CODE", not ModelViewer.IsViewing)
 			context:AddRegistered("SAVE_INST", not ModelViewer.IsViewing)
 			context:AddDivider()
 			
