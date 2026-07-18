@@ -2305,10 +2305,10 @@ local function main()
 			clipboard = newClipboard
 		end})
         
-		context:Register("COPY_GS_CODE",{Name = "Copy GS Code", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", Shortcut = "Ctrl+Shift+C", OnClick = function()
-			local sList,newClipboard = selection.List,{}
+		context:Register("COPY_GS_CODE",{Name = "Copy", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", Shortcut = "Ctrl+Shift+C", OnClick = function()
+			local sList = selection.List
 			local targets = {}
-			for i,v in ipairs() do
+			for i,v in ipairs(sList) do
 				targets[#targets+1] = v.Obj
 			end
 			task.spawn(function()
@@ -11544,6 +11544,7 @@ local function main()
 			context:AddRegistered("STOP", not ModelViewer.IsViewing)	
 			context:AddRegistered("REFRESH", not ModelViewer.IsViewing)
 			context:AddRegistered("COPY_PATH", not ModelViewer.IsViewing)
+            context:AddRegistered("COPY_GS_CODE", not ModelViewer.IsViewing)
 			context:AddRegistered("SAVE_INST", not ModelViewer.IsViewing)
 			context:AddDivider()
 			
